@@ -1,0 +1,81 @@
+                            # this is to drop logins and their corresponding db users / schemas / objects
+#requires -version 3.0
+add-type -AssemblyName "microsoft.sqlserver.smo, version=11.0.0.0, Culture=neutral, PublicKeyToken=89845dcd8080cc91" #version=11.0.0.0 means sql2012, 10.0.0.0 means sql2008/R2
+
+[string[]]$server_list='tp_w520'# can have multiple server instances separated by ","
+[string[]]$login_list = 'tp_w520\jeff_yao', 'mytest', 'XYZ' # change to your own list 
+[boolean]$debug = $true; # $true = printing out the t-sql; $false = drop objects directly inside PS
+
+foreach ($svr in $server_list)
+{
+  $s = New-Object "microsoft.sqlserver.management.smo.server" $svr
+  if ($debug) {":connect $svr";}
+
+  $logins = $s.logins | ? { $_.name -in $login_list } 
+
+  if ($logins.count -gt 0)
+  {
+    foreach ($db in $s.databases)
+    {
+        $users = $db.users | ? {$_.login -in $login_list};
+
+        if ($users.name -contains 'dbo') 
+        {write-error -message "The database [$($db.name)] is owned by $($db.users['dbo'].login), please change db owner to sa before continuing.."; 
+         return;
+        }
+        $roles = $db.roles | ? {$_.owner -in $users.name};
+
+        if ($roles.count -gt 0)
+        {
+           if ($debug) {"use $db ";}
+           $roles | % { if ($debug) {"drop role [$($_.name)];"} else {$_.drop()}; }
+           if ($debug) {"go";}
+        }
+         
+        if ($users.count -gt 0)
+        {
+            if($debug) {"use $db";}
+
+            $schemas = $db.schemas | ? {$_.owner -in $users.name };
+            if ($schemas.count -gt 0)
+            {
+                foreach ($sm in $schemas ) 
+                {
+                    $sm.enumownedobjects() |  
+                    foreach { if($_.xpathexpression.item(2) -match "@name='(.+?)'.+?@schema='(.+?)'") { $sc_name=$matches[2]; $obj_name=$matches[1]; }; 
+                    if ($debug) 
+                    { 
+                      switch ($_.xpathexpression.item(2).name)
+                      { 'Table' {"drop table [$sc_name].[$obj_name]";break;} 
+                        'View' {"drop view [$sc_name].[$obj_name];";break;}
+                        'StoredProcedure' {"drop proc [$sc_name].[$obj_name];";break;}
+                        'UserDefinedFunction' {"drop function [$sc_name].[$obj_name];"; break;}
+                        'UserDefinedDataType' {"drop type [$sc_name].[$obj_name];"; break;}
+                      }
+                    } 
+                    else
+                    { #depending on the owned object type, we need to drop them in a native way
+                      switch ($_.xpathexpression.item(2).name )
+                      { 'Table' {$t = $db.tables.Item($obj_name, $sc_name); $t.drop();break;} 
+                        'View'  {$v=$db.views.item($obj_name, $sc_name); $v.drop();break;}
+                        'StoredProcedure' {$p=$db.StoredProcedures.Item($obj_name, $sc_name); $p.drop();break;}
+                        'UserDefinedFunction' {$f=$db.UserDefinedFunctions.Item($obj_name, $sc_name); $f.drop(); break;}
+                        'UserDefinedDataType' {$f=$db.UserDefinedDataTypes.Item($obj_name, $sc_name); $f.drop(); break;}
+                      }
+                    } 
+                }
+                if($debug) {"drop schema [$($sm.name)];"} else{ $sm.drop();}
+              }#drop schemas
+        }#schemas.count -gt 0
+        $users| % {if ($debug) {"drop user $_;"} else {$_.drop();} };
+        if ($users.count -gt 0)  {if ($debug) {"go"}}
+    }#users.count -gt 0
+  }#if $users.count -gt 0
+      if ($debug) {"use master"}
+    
+    $logins | % { if($debug) {"drop login $_;"} else {$_.drop();} }
+    
+    if ($debug) {"go"}
+
+  }#if $logins.count -gt 0
+} 
