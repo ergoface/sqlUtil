@@ -2,7 +2,7 @@
  Change DB name and file to appropriate db. If In Full or Bulk_Logged mode, do a log backup. This is currently configured for Simple
 ******/
 
-USE TimeOffTracker /*============= Change database Name before running any further =============================*/
+USE PSTAGECache /*============= Change database Name before running any further =============================*/
 GO
 /************************************* Check current status *******************************/
 SELECT size / 128 SizeInMeg,* FROM sys.database_files AS DF /* Check Log file name and physical name and current sizes */
@@ -10,7 +10,7 @@ SELECT D.recovery_model_desc FROM sys.databases AS D
 WHERE D.name = DB_NAME()
 DBCC loginfo /* Display current log file layout*/
 /* Check database integrity*/
-DBCC CHECKDB WITH NO_INFOMSGS
+DBCC CHECKDB WITH NO_INFOMSGS, PHYSICAL_ONLY
 /******************************************************************************************/
 
 
@@ -39,10 +39,12 @@ DBCC OPENTRAN
 DECLARE @LogName NVARCHAR(255),
         @SQL NVARCHAR(4000),
 		@LogSize NVARCHAR(5); 
+SET @LogSize = '480096'; /*Set desired log size here, in MB */
+
 SELECT @LogName = [name] FROM sys.database_files WHERE type_desc = 'LOG'
 
 
-SET @LogSize = '300'; /*Set desired log size here, in MB */
+
 
 
 DBCC SHRINKFILE(@LogName, TRUNCATEONLY) 
@@ -55,3 +57,6 @@ MODIFY FILE
   , SIZE = ' + @LogSize + '
 )';
 EXEC (@SQL);
+SELECT 'Post Resized Info' Info
+SELECT size / 128 SizeInMeg,* FROM sys.database_files AS DF
+DBCC loginfo;
