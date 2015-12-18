@@ -14,3 +14,4 @@ SELECT Schedule.ScheduleID AS SQLAgent_Job_Name
       INNER JOIN [Catalog]
          ON ReportSchedule.ReportID = [Catalog].ItemID
             AND Subscriptions.Report_OID = [Catalog].ItemID
+ORDER BY ReportPath
