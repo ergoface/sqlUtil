@@ -30,7 +30,7 @@ LEFT OUTER JOIN sys.extended_properties ep
            AND p.minor_id = AC.column_id
     WHERE
         T.[is_ms_shipped] = 0
-        AND T.name <> 'sysdiagrams'
+        AND T.name NOT IN('sysdiagrams','tracelog')
     ORDER BY
         T.[name]
       , AC.[column_id];
