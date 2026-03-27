@@ -5,6 +5,7 @@
 * Author: Dave Bennett
 * Created: 1/23/2012
 * Last Updated:8/29/2012 - Fixed syntax to all for databases with '-' in the name
+*              03/27/2026 - Ignore Read-only and Offline dbs
 ***************************************************************************************/
 
 	
@@ -13,7 +14,8 @@
 	DECLARE dbs CURSOR FAST_FORWARD READ_ONLY FOR
 	SELECT NAME, SUSER_SNAME(owner_sid) dbOwner
 		FROM   sys.databases
-		WHERE SUSER_SNAME(owner_sid) != 'sa' OR SUSER_SNAME(owner_sid) is null; 
+		WHERE (SUSER_SNAME(owner_sid) != 'sa' OR SUSER_SNAME(owner_sid) is null)
+		     AND state_desc = 'online' and is_read_only = 0; 
 
 	OPEN dbs
 
