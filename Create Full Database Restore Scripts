@@ -1,0 +1,82 @@
+DECLARE @SourceDB varchar(128) = 'YourDatabase'
+DECLARE @TargetDB varchar(128) = 'YourDatabase'
+DECLARE @BackupStmtFull varchar(max), @BackupStmtDiff varchar(max), @BackupStmtLog varchar(max)
+DECLARE @FullMediaSetId int, @DiffMediaSetId int
+DECLARE @LastLSN numeric(25,0)
+
+/******************************************************************************
+ * 1. CREATE FULL RESTORE SCRIPT
+ ******************************************************************************/
+-- Find the most recent Full Backup that is NOT a copy-only backup
+SELECT TOP 1 @FullMediaSetId = media_set_id 
+FROM msdb.dbo.backupset 
+WHERE database_name = @SourceDB AND type = 'D' AND is_copy_only = 0 
+ORDER BY backup_start_date DESC;
+
+-- Aggregate all files and dynamically assign DISK or URL
+SELECT @BackupStmtFull = STUFF((
+    SELECT ', ' + CASE WHEN device_type = 9 THEN 'URL' ELSE 'DISK' END + '=''' + physical_device_name + ''''
+    FROM msdb.dbo.backupmediafamily
+    WHERE media_set_id = @FullMediaSetId
+    FOR XML PATH('')
+), 1, 2, '');
+
+IF @BackupStmtFull IS NOT NULL
+    PRINT 'RESTORE DATABASE [' + @TargetDB + '] FROM ' + @BackupStmtFull + ' WITH NOUNLOAD, REPLACE, STATS=10, NORECOVERY' + CHAR(10);
+ELSE
+    PRINT '-- ERROR: NO VALID FULL BACKUP FOUND FOR ' + @SourceDB + CHAR(10);
+
+/******************************************************************************
+ * 2. CREATE DIFF RESTORE SCRIPT
+ ******************************************************************************/
+-- Find the most recent Diff Backup taken AFTER our specific Full Backup
+SELECT TOP 1 @DiffMediaSetId = media_set_id, @LastLSN = last_lsn
+FROM msdb.dbo.backupset 
+WHERE database_name = @SourceDB AND type = 'I' AND is_copy_only = 0 
+  AND backup_start_date > (SELECT backup_start_date FROM msdb.dbo.backupset WHERE media_set_id = @FullMediaSetId)
+ORDER BY backup_start_date DESC;
+
+SELECT @BackupStmtDiff = STUFF((
+    SELECT ', ' + CASE WHEN device_type = 9 THEN 'URL' ELSE 'DISK' END + '=''' + physical_device_name + ''''
+    FROM msdb.dbo.backupmediafamily
+    WHERE media_set_id = @DiffMediaSetId
+    FOR XML PATH('')
+), 1, 2, '');
+
+IF @BackupStmtDiff IS NOT NULL
+    PRINT 'RESTORE DATABASE [' + @TargetDB + '] FROM ' + @BackupStmtDiff + ' WITH NOUNLOAD, STATS=10, NORECOVERY' + CHAR(10);
+
+/******************************************************************************
+ * 3. CREATE TLOG RESTORE SCRIPT
+ ******************************************************************************/
+-- Set the starting LSN point (from Diff if it exists, otherwise from Full)
+IF @LastLSN IS NULL 
+    SELECT @LastLSN = last_lsn FROM msdb.dbo.backupset WHERE media_set_id = @FullMediaSetId;
+
+-- Use Cursor to iterate through all log backups in order
+DECLARE crLog CURSOR LOCAL FAST_FORWARD FOR
+SELECT STUFF((
+        SELECT ', ' + CASE WHEN f.device_type = 9 THEN 'URL' ELSE 'DISK' END + '=''' + f.physical_device_name + ''''
+        FROM msdb.dbo.backupmediafamily f
+        WHERE f.media_set_id = b.media_set_id
+        FOR XML PATH('')
+    ), 1, 2, '')
+FROM msdb.dbo.backupset b
+WHERE b.database_name = @SourceDB AND b.type = 'L' 
+  AND b.last_lsn >= ISNULL(@LastLSN, 0)
+ORDER BY b.backup_start_date ASC;
+
+OPEN crLog;
+FETCH NEXT FROM crLog INTO @BackupStmtLog;
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    PRINT 'RESTORE LOG [' + @TargetDB + '] FROM ' + @BackupStmtLog + ' WITH NORECOVERY, NOUNLOAD, STATS=10';
+    FETCH NEXT FROM crLog INTO @BackupStmtLog;
+END
+
+CLOSE crLog;
+DEALLOCATE crLog;
+
+-- Final command to bring the database online
+PRINT CHAR(10) + 'RESTORE DATABASE [' + @TargetDB + '] WITH RECOVERY;';
