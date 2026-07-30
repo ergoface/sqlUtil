@@ -1,0 +1,29 @@
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+GO
+
+SELECT
+      SCHEMA_NAME(o.[schema_id])        AS [SchemaName]
+    , o.[name]                          AS [TableName]
+    , ISNULL(i.[name], 'N/A (Column Stat)') AS [IndexName]
+    , s.[name]                          AS [StatsName]
+    , sp.[last_updated]                 AS [StatsLastUpdated]
+    , sp.[rows]                         AS [TotalRows]
+    , sp.[rows_sampled]                 AS [RowsSampled]
+    , CAST((sp.[rows_sampled] * 100.0) / NULLIF(sp.[rows], 0) AS DECIMAL(5, 2)) AS [SamplingPercent]
+    , sp.[modification_counter]         AS [RowsModifiedSinceUpdate]
+    , s.[user_created]                  AS [IsUserCreatedStats]
+    , s.[auto_created]                  AS [IsAutoCreatedStats]
+FROM sys.objects o
+INNER JOIN sys.stats s 
+    ON o.[object_id] = s.[object_id]
+-- We use LEFT JOIN because auto-created stats don't belong to a physical index
+LEFT JOIN sys.indexes i 
+    ON s.[object_id] = i.[object_id] 
+    AND s.[stats_id] = i.[index_id]
+OUTER APPLY sys.dm_db_stats_properties(s.[object_id], s.[stats_id]) sp
+WHERE o.[type] = 'U' 
+  AND o.[is_ms_shipped] = 0 -- Exclude system tables
+ORDER BY 
+      sp.[modification_counter] DESC
+    , sp.[last_updated] ASC;
+GO
