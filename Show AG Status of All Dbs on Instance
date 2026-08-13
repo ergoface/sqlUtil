@@ -1,0 +1,27 @@
+/* Show AG status of all databases on a server */
+
+SELECT 
+    d.name AS [DatabaseName],
+    -- If replica_id is NULL, the database is not in an AG
+    CASE 
+        WHEN d.replica_id IS NULL THEN 'Standalone (No AG)'
+        WHEN DRS.is_local = 1 THEN 'Local AG Replica'
+        ELSE 'Remote AG Replica'
+    END AS [AGStatus],
+    -- Determine role only if it's in an AG
+    CASE 
+        WHEN d.replica_id IS NULL THEN 'N/A'
+        WHEN DRS.is_local = 1 AND AR.replica_server_name = @@SERVERNAME THEN ARS.role_desc
+        ELSE 'Check Replica'
+    END AS [CurrentRole],
+    -- Show synchronization state or N/A
+    ISNULL(DRS.synchronization_state_desc, 'N/A') AS [SyncState]
+FROM sys.databases d
+-- Left Join to capture databases not participating in any AG
+LEFT JOIN sys.dm_hadr_database_replica_states DRS 
+    ON d.database_id = DRS.database_id 
+    AND DRS.is_local = 1 -- Keep the filter here on the join to avoid filtering out standalone DBs
+LEFT JOIN sys.dm_hadr_availability_replica_states ARS 
+    ON DRS.replica_id = ARS.replica_id
+LEFT JOIN sys.availability_replicas AR 
+    ON DRS.replica_id = AR.replica_id;
