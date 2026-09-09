@@ -1,0 +1,125 @@
+--------------------------------------------------------------------------------
+-- Script: Parsed Deadlock Breakdown (Victim vs. Survivor Side-by-Side)
+-- Extracts: Local Time, Database, Victim SPID/SQL, Survivor SPID/SQL, Full XML
+--------------------------------------------------------------------------------
+DECLARE @SessionPath NVARCHAR(4000);
+
+-- 1. Locate system_health .xel files dynamically
+SELECT TOP 1 
+    @SessionPath = CAST(target_data AS XML).value('(/EventFileTarget/File/@name)[1]', 'NVARCHAR(4000)')
+FROM sys.dm_xe_session_targets st
+INNER JOIN sys.dm_xe_sessions s 
+    ON s.address = st.event_session_address
+WHERE s.name = 'system_health'
+  AND st.target_name = 'event_file';
+
+IF @SessionPath IS NOT NULL
+BEGIN
+    SET @SessionPath = SUBSTRING(@SessionPath, 1, LEN(@SessionPath) - CHARINDEX('_', REVERSE(@SessionPath))) + '*.xel';
+END;
+
+-- 2. Extract and Shred Deadlock Events
+WITH RawDeadlockEvents AS (
+    SELECT 
+        CAST(event_data AS XML) AS EventXml,
+        file_name,
+        file_offset
+    FROM sys.fn_xe_file_target_read_file(@SessionPath, NULL, NULL, NULL)
+    WHERE object_name = 'xml_deadlock_report'
+),
+DeadlockReports AS (
+    SELECT 
+        ROW_NUMBER() OVER (ORDER BY (SELECT 1)) AS DeadlockID,
+        DATEADD(mi, DATEDIFF(mi, GETUTCDATE(), GETDATE()), 
+            EventXml.value('(/event/@timestamp)[1]', 'DATETIME2')) AS DeadlockTimeLocal,
+        EventXml.query('/event/data[@name="xml_report"]/value/deadlock') AS DeadlockGraph,
+        -- Extract Victim Process ID(s) from either attribute or victim-list
+        COALESCE(
+            EventXml.value('(/event/data[@name="xml_report"]/value/deadlock/@victim)[1]', 'VARCHAR(100)'),
+            EventXml.value('(/event/data[@name="xml_report"]/value/deadlock/victim-list/victimProcess/@id)[1]', 'VARCHAR(100)')
+        ) AS VictimId
+    FROM RawDeadlockEvents
+),
+ShreddedProcesses AS (
+    SELECT 
+        d.DeadlockID,
+        d.DeadlockTimeLocal,
+        d.VictimId,
+        p.value('@id', 'VARCHAR(100)') AS ProcessId,
+        CASE 
+            WHEN p.value('@id', 'VARCHAR(100)') = d.VictimId THEN 'VICTIM'
+            ELSE 'SURVIVOR'
+        END AS ProcessRole,
+        COALESCE(
+            DB_NAME(p.value('@currentdb', 'INT')),
+            p.value('@currentdbname', 'SYSNAME')
+        ) AS DatabaseName,
+        p.value('@spid', 'INT') AS Spid,
+        p.value('@loginname', 'SYSNAME') AS LoginName,
+        p.value('@hostname', 'SYSNAME') AS HostName,
+        p.value('@clientapp', 'SYSNAME') AS ClientApp,
+        p.value('@isolationlevel', 'VARCHAR(50)') AS IsolationLevel,
+        p.value('@lockMode', 'VARCHAR(20)') AS LockMode,
+        COALESCE(
+            NULLIF(LTRIM(RTRIM(p.value('(executionStack/frame)[1]', 'VARCHAR(MAX)'))), ''),
+            p.value('(inputbuf)[1]', 'VARCHAR(MAX)')
+        ) AS SqlText
+    FROM DeadlockReports d
+    CROSS APPLY d.DeadlockGraph.nodes('/deadlock/process-list/process') AS P(p)
+),
+AggregatedResults AS (
+    SELECT 
+        DeadlockID,
+        DeadlockTimeLocal,
+        MAX(DatabaseName) AS [DatabaseName],
+        
+        ----------------------------------------------------
+        -- ❌ VICTIM (The Process That Lost / Rolled Back)
+        ----------------------------------------------------
+        MAX(CASE WHEN ProcessRole = 'VICTIM' THEN Spid END) AS [Victim_SPID],
+        MAX(CASE WHEN ProcessRole = 'VICTIM' THEN LoginName END) AS [Victim_Login],
+        MAX(CASE WHEN ProcessRole = 'VICTIM' THEN HostName END) AS [Victim_Host],
+        MAX(CASE WHEN ProcessRole = 'VICTIM' THEN ClientApp END) AS [Victim_App],
+        MAX(CASE WHEN ProcessRole = 'VICTIM' THEN IsolationLevel END) AS [Victim_IsolationLevel],
+        MAX(CASE WHEN ProcessRole = 'VICTIM' THEN LockMode END) AS [Victim_LockRequested],
+        MAX(CASE WHEN ProcessRole = 'VICTIM' THEN SqlText END) AS [Victim_SqlText],
+        
+        ----------------------------------------------------
+        -- 🏆 SURVIVOR (The Process That Won / Committed)
+        ----------------------------------------------------
+        MAX(CASE WHEN ProcessRole = 'SURVIVOR' THEN Spid END) AS [Survivor_SPID],
+        MAX(CASE WHEN ProcessRole = 'SURVIVOR' THEN LoginName END) AS [Survivor_Login],
+        MAX(CASE WHEN ProcessRole = 'SURVIVOR' THEN HostName END) AS [Survivor_Host],
+        MAX(CASE WHEN ProcessRole = 'SURVIVOR' THEN ClientApp END) AS [Survivor_App],
+        MAX(CASE WHEN ProcessRole = 'SURVIVOR' THEN IsolationLevel END) AS [Survivor_IsolationLevel],
+        MAX(CASE WHEN ProcessRole = 'SURVIVOR' THEN LockMode END) AS [Survivor_LockRequested],
+        MAX(CASE WHEN ProcessRole = 'SURVIVOR' THEN SqlText END) AS [Survivor_SqlText]
+    FROM ShreddedProcesses
+    GROUP BY 
+        DeadlockID,
+        DeadlockTimeLocal
+)
+SELECT 
+    a.DeadlockTimeLocal,
+    a.DatabaseName,
+    a.Victim_SPID,
+    a.Victim_Login,
+    a.Victim_Host,
+    a.Victim_App,
+    a.Victim_IsolationLevel,
+    a.Victim_LockRequested,
+    a.Victim_SqlText,
+    a.Survivor_SPID,
+    a.Survivor_Login,
+    a.Survivor_Host,
+    a.Survivor_App,
+    a.Survivor_IsolationLevel,
+    a.Survivor_LockRequested,
+    a.Survivor_SqlText,
+    d.DeadlockGraph AS [FullDeadlockXml]
+FROM AggregatedResults a
+INNER JOIN DeadlockReports d 
+    ON a.DeadlockID = d.DeadlockID
+ORDER BY 
+    a.DeadlockTimeLocal DESC;
+GO
