@@ -1,0 +1,9 @@
+/*Show how much the db has changed since last full backup*/
+SELECT 
+    DB_NAME() AS [DatabaseName],
+    SUM(allocated_extent_page_count) * 8.0 / 1024.0 AS [AllocatedSpace_MB],
+    SUM(modified_extent_page_count) * 8.0 / 1024.0 AS [ModifiedSpaceSinceFull_MB],
+    -- Calculate percentage of changes relative to currently allocated space
+    CAST((SUM(modified_extent_page_count) * 100.0) / 
+          NULLIF(SUM(allocated_extent_page_count), 0) AS DECIMAL(5,2)) AS [PercentageChanged]
+FROM sys.dm_db_file_space_usage;
