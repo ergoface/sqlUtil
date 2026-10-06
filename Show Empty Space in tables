@@ -1,0 +1,31 @@
+/*Show Empty Space in tables*/
+SELECT 
+    t.name AS TableName,
+    i.name AS IndexName,
+    i.type_desc AS IndexType,
+    a.type_desc AS AllocationType,
+    -- Total pages reserved by the file system for this LOB unit
+    a.total_pages AS TotalAllocatedPages,
+    CAST(a.total_pages * 8.0 / 1024 AS DECIMAL(18, 2)) AS TotalAllocated_MB,
+    -- Pages that contain actual active LOB data bytes
+    a.used_pages AS ActiveAllocatedPages,
+    CAST(a.used_pages * 8.0 / 1024 AS DECIMAL(18, 2)) AS ActiveAllocated_MB,
+    -- Pages that are reserved for the table but currently empty/unused
+    (a.total_pages - a.used_pages) AS UnusedAllocatedPages,
+    CAST((a.total_pages - a.used_pages) * 8.0 / 1024 AS DECIMAL(18, 2)) AS UnusedAllocated_MB,
+    -- Percentage of allocated space that is completely empty
+    CAST(
+        CASE 
+            WHEN a.total_pages = 0 THEN 0 
+            ELSE (a.total_pages - a.used_pages) * 100.0 / a.total_pages 
+        END AS DECIMAL(5,2)
+    ) AS PercentBloat
+FROM sys.tables t
+INNER JOIN sys.indexes i ON t.object_id = i.object_id
+INNER JOIN sys.partitions p ON i.object_id = p.object_id AND i.index_id = p.index_id
+INNER JOIN sys.allocation_units a ON p.partition_id = a.container_id
+--WHERE --t.object_id = OBJECT_ID('[Registry].[TrainingImage]')
+ -- AND 
+ -- a.type_desc = 'LOB_DATA'
+  order by UnusedAllocated_MB desc, TotalAllocated_MB desc;
+
