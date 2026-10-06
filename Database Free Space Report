@@ -1,0 +1,49 @@
+/*Database Free Space Report*/
+SELECT
+    DB_NAME() AS DatabaseName,
+    CAST(SUM(size) * 8.0 / 1024 AS DECIMAL(18, 2)) AS AllocatedSpace_MB,
+    CAST(SUM(FILEPROPERTY(name, 'SpaceUsed')) * 8.0 / 1024 AS DECIMAL(18, 2)) AS UsedSpace_MB,
+    CAST((SUM(size) - SUM(FILEPROPERTY(name, 'SpaceUsed'))) * 8.0 / 1024 AS DECIMAL(18, 2)) AS ShrinkableFreeSpace_MB,
+    CAST((SUM(size) - SUM(FILEPROPERTY(name, 'SpaceUsed'))) * 100.0 / SUM(size) AS DECIMAL(18, 2)) AS FreeSpace_Percent
+FROM sys.database_files
+WHERE type_desc = 'ROWS';
+
+/*Database File Details*/
+SELECT
+    file_id AS FileID,
+    name AS LogicalName,
+    type_desc AS FileType,
+    physical_name as PhysicalPath,
+    CAST(size * 8.0 / 1024 AS DECIMAL(18, 2)) AS TotalSize_MB,
+    CAST(FILEPROPERTY(name, 'SpaceUsed') * 8.0 / 1024 AS DECIMAL(18, 2)) AS UsedSpace_MB,
+    CAST((size - FILEPROPERTY(name, 'SpaceUsed')) * 8.0 / 1024 AS DECIMAL(18, 2)) AS FreeSpace_MB
+FROM sys.database_files;
+
+/*Database Table Space Details*/
+go
+WITH SpaceDetails AS (
+    SELECT
+        t.name AS TableName,
+        p.rows AS RowCnt,
+        a.type_desc AS AllocationType,
+        CAST(a.total_pages * 8.0 / 1024 AS DECIMAL(18, 2)) AS TotalSpace_MB,
+        CAST(a.used_pages * 8.0 / 1024 AS DECIMAL(18, 2)) AS UsedSpace_MB,
+        CAST(a.data_pages * 8.0 / 1024 AS DECIMAL(18, 2)) AS DataSpace_MB
+    FROM sys.tables t
+    INNER JOIN sys.indexes i ON t.object_id = i.object_id
+    INNER JOIN sys.partitions p ON i.object_id = p.object_id AND i.index_id = p.index_id
+    INNER JOIN sys.allocation_units a ON p.partition_id = a.container_id
+    WHERE t.is_ms_shipped = 0
+)
+SELECT
+    s.TableName,
+    s.RowCnt,
+    s.AllocationType,
+    s.TotalSpace_MB,
+    s.UsedSpace_MB,
+    (s.TotalSpace_MB - s.UsedSpace_MB) AS UnusedSpace_MB
+FROM SpaceDetails s
+ORDER BY UnusedSpace_MB desc,s.TotalSpace_MB DESC;
+
+
+
