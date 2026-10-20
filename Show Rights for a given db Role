@@ -1,0 +1,18 @@
+/*Show rights for a given database role */
+SELECT 
+    dp.state_desc AS [PermissionState],   -- GRANT, WITH GRANT OPTION, or DENY
+    dp.permission_name AS [Permission],
+    ObjectClass = CASE dp.class
+        WHEN 1 THEN 'OBJECT'
+        WHEN 0 THEN 'DATABASE'
+        WHEN 3 THEN 'SCHEMA'
+        ELSE 'OTHER (' + CAST(dp.class AS VARCHAR(10)) + ')'
+    END,
+    ObjectSchema = OBJECT_SCHEMA_NAME(dp.major_id),
+    ObjectName = OBJECT_NAME(dp.major_id),
+    [GranteeRole] = rp.name
+FROM sys.database_permissions dp
+INNER JOIN sys.database_principals rp 
+    ON dp.grantee_principal_id = rp.principal_id
+WHERE rp.type = 'R' -- 'R' restricts the results to Database Roles
+  AND rp.name = 'Public'; -- Replace with your target role name
