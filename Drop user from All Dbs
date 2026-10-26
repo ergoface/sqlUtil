@@ -1,0 +1,179 @@
+SET NOCOUNT ON;
+
+/* ============================================================================
+DROP User from all databases in the instance. 
+
+   CONFIGURATION PARAMETERS
+   ============================================================================ */
+DECLARE @TargetUser      SYSNAME = N'<user to drop>'; -- Target username to drop
+DECLARE @DryRun          BIT     = 1;                 -- 1 = Report actions only | 0 = Execute changes
+DECLARE @ReassignSchemas BIT     = 1;                 -- 1 = Transfer owned schemas/roles to dbo before drop
+DECLARE @NewSchemaOwner  SYSNAME = N'dbo';            -- Target owner for reassigned schemas/roles
+DECLARE @IncludeSystemDB BIT     = 0;                 -- 0 = Exclude master, model, msdb, tempdb
+
+/* ============================================================================
+   VARIABLE DECLARATIONS & VALIDATION
+   ============================================================================ */
+DECLARE @CurrentDB       SYSNAME;
+DECLARE @SqlStatement    NVARCHAR(MAX);
+DECLARE @ErrorMessage    NVARCHAR(4000);
+DECLARE @TotalFound      INT = 0;
+
+IF @TargetUser IS NULL OR LTRIM(RTRIM(@TargetUser)) = N''
+BEGIN
+    RAISERROR(N'Error: @TargetUser cannot be null or empty.', 16, 1);
+    RETURN;
+END;
+
+PRINT N'======================================================================';
+IF @DryRun = 1
+    PRINT N'MODE: DRY RUN (No changes will be applied)';
+ELSE
+    PRINT N'MODE: LIVE EXECUTION (Changes WILL be committed)';
+PRINT N'Target User : ' + QUOTENAME(@TargetUser);
+PRINT N'Timestamp   : ' + CONVERT(NVARCHAR(30), GETDATE(), 120);
+PRINT N'======================================================================';
+
+/* ============================================================================
+   DATABASE ITERATION CURSOR
+   ============================================================================ */
+DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+SELECT name
+FROM sys.databases
+WHERE state_desc = 'ONLINE'
+  AND is_read_only = 0
+  AND source_database_id IS NULL -- Exclude database snapshots
+  AND (
+      @IncludeSystemDB = 1 
+      OR name NOT IN (N'master', N'model', N'msdb', N'tempdb')
+  )
+  -- Ensure database is writable (filters out Always On secondary replicas)
+  AND DATABASEPROPERTYEX(name, 'Updateability') = 'READ_WRITE'
+ORDER BY name;
+
+OPEN db_cursor;
+FETCH NEXT FROM db_cursor INTO @CurrentDB;
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    -- Query executed in the context of each database to inspect and optionally act
+    SET @SqlStatement = N'
+    USE ' + QUOTENAME(@CurrentDB) + N';
+
+    DECLARE @UserPrincipalId INT;
+    DECLARE @ExecSql         NVARCHAR(MAX);
+
+    SELECT @UserPrincipalId = principal_id
+    FROM sys.database_principals
+    WHERE name = @InternalTargetUser
+      AND type IN (''S'', ''U'', ''G'', ''E'', ''X'');
+
+    IF @UserPrincipalId IS NOT NULL
+    BEGIN
+        SET @InternalUserFound = 1;
+
+        -- 1. Check Schema Ownership
+        IF EXISTS (SELECT 1 FROM sys.schemas WHERE principal_id = @UserPrincipalId)
+        BEGIN
+            DECLARE @SchemaName SYSNAME;
+            DECLARE schema_cursor CURSOR LOCAL FAST_FORWARD FOR
+                SELECT name FROM sys.schemas WHERE principal_id = @UserPrincipalId;
+
+            OPEN schema_cursor;
+            FETCH NEXT FROM schema_cursor INTO @SchemaName;
+            WHILE @@FETCH_STATUS = 0
+            BEGIN
+                IF @InternalDryRun = 1
+                BEGIN
+                    PRINT N''['' + DB_NAME() + N''] [DRY RUN] Schema '' + QUOTENAME(@SchemaName) + N'' owned by user -> would reassign to '' + QUOTENAME(@InternalNewOwner) + N''.'';
+                END
+                ELSE
+                BEGIN
+                    IF @InternalReassignSchemas = 1
+                    BEGIN
+                        PRINT N''['' + DB_NAME() + N''] Reassigning schema '' + QUOTENAME(@SchemaName) + N'' to '' + QUOTENAME(@InternalNewOwner) + N''...'';
+                        SET @ExecSql = N''ALTER AUTHORIZATION ON SCHEMA::'' + QUOTENAME(@SchemaName) + N'' TO '' + QUOTENAME(@InternalNewOwner) + N'';'';
+                        EXEC sp_executesql @stmt = @ExecSql;
+                    END
+                    ELSE
+                    BEGIN
+                        RAISERROR(N''User owns schemas and @ReassignSchemas is disabled.'', 16, 1);
+                    END;
+                END;
+                FETCH NEXT FROM schema_cursor INTO @SchemaName;
+            END;
+            CLOSE schema_cursor;
+            DEALLOCATE schema_cursor;
+        END;
+
+        -- 2. Check Role Ownership
+        IF EXISTS (SELECT 1 FROM sys.database_principals WHERE owning_principal_id = @UserPrincipalId)
+        BEGIN
+            DECLARE @RoleName SYSNAME;
+            DECLARE role_cursor CURSOR LOCAL FAST_FORWARD FOR
+                SELECT name FROM sys.database_principals WHERE owning_principal_id = @UserPrincipalId;
+
+            OPEN role_cursor;
+            FETCH NEXT FROM role_cursor INTO @RoleName;
+            WHILE @@FETCH_STATUS = 0
+            BEGIN
+                IF @InternalDryRun = 1
+                BEGIN
+                    PRINT N''['' + DB_NAME() + N''] [DRY RUN] Role '' + QUOTENAME(@RoleName) + N'' owned by user -> would reassign to '' + QUOTENAME(@InternalNewOwner) + N''.'';
+                END
+                ELSE
+                BEGIN
+                    PRINT N''['' + DB_NAME() + N''] Reassigning role '' + QUOTENAME(@RoleName) + N'' to '' + QUOTENAME(@InternalNewOwner) + N''...'';
+                    SET @ExecSql = N''ALTER AUTHORIZATION ON ROLE::'' + QUOTENAME(@RoleName) + N'' TO '' + QUOTENAME(@InternalNewOwner) + N'';'';
+                    EXEC sp_executesql @stmt = @ExecSql;
+                END;
+                FETCH NEXT FROM role_cursor INTO @RoleName;
+            END;
+            CLOSE role_cursor;
+            DEALLOCATE role_cursor;
+        END;
+
+        -- 3. Drop User
+        IF @InternalDryRun = 1
+        BEGIN
+            PRINT N''['' + DB_NAME() + N''] [DRY RUN] User '' + QUOTENAME(@InternalTargetUser) + N'' FOUND -> would drop.'';
+        END
+        ELSE
+        BEGIN
+            PRINT N''['' + DB_NAME() + N''] Dropping user '' + QUOTENAME(@InternalTargetUser) + N''...'';
+            SET @ExecSql = N''DROP USER '' + QUOTENAME(@InternalTargetUser) + N'';'';
+            EXEC sp_executesql @stmt = @ExecSql;
+            PRINT N''['' + DB_NAME() + N''] Successfully dropped user '' + QUOTENAME(@InternalTargetUser) + N''.'';
+        END;
+    END;';
+
+    BEGIN TRY
+        DECLARE @UserFoundInDB BIT = 0;
+
+        EXEC sp_executesql 
+            @stmt = @SqlStatement, 
+            @params = N'@InternalTargetUser SYSNAME, @InternalDryRun BIT, @InternalReassignSchemas BIT, @InternalNewOwner SYSNAME, @InternalUserFound BIT OUTPUT',
+            @InternalTargetUser = @TargetUser,
+            @InternalDryRun = @DryRun,
+            @InternalReassignSchemas = @ReassignSchemas,
+            @InternalNewOwner = @NewSchemaOwner,
+            @InternalUserFound = @UserFoundInDB OUTPUT;
+
+        IF @UserFoundInDB = 1
+            SET @TotalFound = @TotalFound + 1;
+    END TRY
+    BEGIN CATCH
+        SELECT @ErrorMessage = ERROR_MESSAGE();
+        PRINT N'[' + @CurrentDB + N'] [ERROR]: ' + @ErrorMessage;
+    END CATCH;
+
+    FETCH NEXT FROM db_cursor INTO @CurrentDB;
+END;
+
+CLOSE db_cursor;
+DEALLOCATE db_cursor;
+
+PRINT N'----------------------------------------------------------------------';
+PRINT N'Summary: User ' + QUOTENAME(@TargetUser) + N' detected in ' + CAST(@TotalFound AS NVARCHAR(10)) + N' database(s).';
+PRINT N'Operation Completed.';
+PRINT N'----------------------------------------------------------------------';
