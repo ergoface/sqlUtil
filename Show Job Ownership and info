@@ -1,0 +1,16 @@
+/* Show Job Ownership info */
+  SELECT 
+    sj.name AS [JobName],
+    ISNULL(sp.name, 'UNKNOWN / ORPHANED SID') AS [JobOwner],
+    CASE sj.enabled 
+        WHEN 1 THEN 'Enabled' 
+        ELSE 'Disabled' 
+    END AS [JobStatus],
+    sj.description AS [Description],
+    sj.date_created AS [DateCreated],
+    sj.date_modified AS [DateModified]
+FROM msdb.dbo.sysjobs AS sj
+LEFT JOIN sys.server_principals AS sp 
+    ON sj.owner_sid = sp.sid
+ORDER BY 
+    2 ASC;
