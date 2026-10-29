@@ -1,0 +1,42 @@
+USE WorkDB;
+GO
+
+DECLARE @Username NVARCHAR(256);
+DECLARE @SqlStmt NVARCHAR(512);
+
+-- Cursor to find all orphaned users (users without valid logins)
+-- Excludes system users, roles, and schemas
+DECLARE OrphanedUserCursor CURSOR FOR
+SELECT dp.name
+FROM sys.database_principals AS dp
+LEFT JOIN sys.server_principals AS sp ON dp.sid = sp.sid
+WHERE dp.type IN ('S', 'U', 'G') -- SQL user, Windows user, Windows group
+  AND dp.authentication_type = 1 -- Instance-level/Windows authentication
+  AND sp.sid IS NULL             -- No matching server login SID
+  AND dp.name NOT IN ('dbo', 'guest', 'INFORMATION_SCHEMA', 'sys');
+
+OPEN OrphanedUserCursor;
+
+FETCH NEXT FROM OrphanedUserCursor INTO @Username;
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    -- Verify if a server login with the same name actually exists before mapping
+    IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name = @Username AND type IN ('S', 'U', 'G'))
+    BEGIN
+        SET @SqlStmt = 'ALTER USER ' + QUOTENAME(@Username) + ' WITH LOGIN = ' + QUOTENAME(@Username) + ';';
+        
+        PRINT 'Mapping orphaned user [' + @Username + '] to matching login...';
+        EXEC sp_executesql @SqlStmt;
+    END
+    ELSE
+    BEGIN
+        PRINT 'WARNING: Database user [' + @Username + '] is orphaned, but no matching server login exists.';
+    END
+
+    FETCH NEXT FROM OrphanedUserCursor INTO @Username;
+END;
+
+CLOSE OrphanedUserCursor;
+DEALLOCATE OrphanedUserCursor;
+GO
