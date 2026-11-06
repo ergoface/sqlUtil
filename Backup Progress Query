@@ -1,0 +1,13 @@
+/*Backup Progress Query*/
+SELECT 
+    r.session_id AS [SPID],
+    DB_NAME(r.database_id) AS [DatabaseName],
+    r.command AS [Operation],
+    CONVERT(NUMERIC(5, 2), r.percent_complete) AS [PercentComplete],
+    CONVERT(VARCHAR(20), DATEADD(ms, r.estimated_completion_time, GETDATE()), 120) AS [EstimatedCompletionTime],
+    CONVERT(NUMERIC(10, 2), r.total_elapsed_time / 1000.0 / 60.0) AS [ElapsedMinutes],
+    CONVERT(NUMERIC(10, 2), r.estimated_completion_time / 1000.0 / 60.0) AS [RemainingMinutes],
+    t.text AS [SQLStatement]
+FROM sys.dm_exec_requests r
+CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
+WHERE r.command IN ('BACKUP DATABASE', 'BACKUP LOG', 'RESTORE DATABASE', 'RESTORE LOG');
